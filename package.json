@@ -1,0 +1,13 @@
+{
+  "name": "meshcore-tile-generator",
+  "version": "1.0.0",
+  "description": "A TypeScript tile generator powered by Bun",
+  "main": "index.ts",
+  "type": "module",
+  "scripts": {
+    "start": "bun run index.ts",
+    "dev": "bun run --watch index.ts"
+  },
+  "keywords": ["tile", "generator", "meshcore", "typescript", "bun"],
+  "license": "MIT"
+}
