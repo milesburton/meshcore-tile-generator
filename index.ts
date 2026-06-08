@@ -16,6 +16,7 @@
 // - Supports resumption: already-downloaded tiles are skipped automatically
 // ============================================================================
 
+import { config } from "dotenv";
 import { existsSync } from "node:fs";
 import { mkdir, copyFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -426,6 +427,9 @@ async function processTiles(config: typeof CONFIG): Promise<TileStatsAccumulator
 // ---------------------------------------------------------------------------
 
 async function main(): Promise<void> {
+  // Load .env file
+  config();
+
   log(createLog("INFO", "Meshcore Tile Generator started"));
   log(createLog("INFO", "─".repeat(80)));
 
@@ -447,4 +451,7 @@ async function main(): Promise<void> {
   log(createLog("INFO", "Meshcore Tile Generator finished"));
 }
 
-await main();
+// Only run main() when executed directly (not when imported by tests)
+if (import.meta.main) {
+  await main();
+}

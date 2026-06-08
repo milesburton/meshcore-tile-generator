@@ -9,5 +9,8 @@
     "dev": "bun run --watch index.ts"
   },
   "keywords": ["tile", "generator", "meshcore", "typescript", "bun"],
-  "license": "MIT"
+  "license": "MIT",
+  "dependencies": {
+    "dotenv": "^17.4.2"
+  }
 }
