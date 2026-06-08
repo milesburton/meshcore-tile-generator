@@ -82,7 +82,7 @@ const CONFIG: Readonly<{
   }),
   zoomLevels: Object.freeze(range(1, 7)),
   mapstyle: "outdoors",
-  apiKey: "",
+  apiKey: process.env.STADIA_API_KEY ?? "",
   globalDir: join(homedir(), "Documents", "tiles-greater-london"),
   outputDir: join(homedir(), "Desktop", "tiles"),
   tileServerUrl: (zoom: number, x: number, y: number): string =>
@@ -428,6 +428,14 @@ async function processTiles(config: typeof CONFIG): Promise<TileStatsAccumulator
 async function main(): Promise<void> {
   log(createLog("INFO", "Meshcore Tile Generator started"));
   log(createLog("INFO", "─".repeat(80)));
+
+  // Validate API key is configured
+  if (!process.env.STADIA_API_KEY) {
+    log(createLog("ERROR", "STADIA_API_KEY environment variable is not set."));
+    log(createLog("ERROR", "Create a .env file with: STADIA_API_KEY=your-api-key-here"));
+    log(createLog("ERROR", "Get your key at: https://stadia.mapswithme.com/"));
+    process.exit(1);
+  }
 
   const stats = await processTiles(CONFIG);
 
