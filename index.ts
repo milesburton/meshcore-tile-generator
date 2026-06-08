@@ -29,7 +29,7 @@ import { homedir } from "node:os";
  * A bounding box represented as [minLat, minLon, maxLat, maxLon].
  * All coordinates are in WGS84 (EPSG:4326) degrees.
  */
-type BoundingBox = [number, number, number, number];
+export type BoundingBox = [number, number, number, number];
 
 /** Log level constants */
 type LogLevel = "DEBUG" | "INFO" | "WARN" | "ERROR";
@@ -39,6 +39,29 @@ interface LogEntry {
   level: LogLevel;
   message: string;
   timestamp: string;
+}
+
+/** Result of downloading a single tile */
+interface TileDownloadResult {
+  success: boolean;
+  alreadyExists: boolean;
+  cached: boolean;
+  error?: string;
+}
+
+/** Accumulator for tile statistics */
+interface TileStatsAccumulator {
+  downloaded: number;
+  cached: number;
+  skipped: number;
+  failed: number;
+}
+
+/** Tile coordinate with zoom level */
+export interface TileCoordinate {
+  zoom: number;
+  x: number;
+  y: number;
 }
 
 // ---------------------------------------------------------------------------
@@ -71,10 +94,10 @@ const CONFIG: Readonly<{
 // ---------------------------------------------------------------------------
 
 /**
- * Creates an inclusive range of integers from `start` to `endExclusive - 1`.
+ * Creates an array of integers from `start` (inclusive) to `endExclusive` (exclusive).
  * Pure function — no side effects.
  */
-function range(start: number, endExclusive: number): number[] {
+export function range(start: number, endExclusive: number): number[] {
   return Array.from(
     { length: endExclusive - start },
     (_: unknown, index: number) => start + index,
@@ -86,7 +109,7 @@ function range(start: number, endExclusive: number): number[] {
  * Pure function — deterministic, no side effects.
  * @see https://wiki.openstreetmap.org/wiki/Slippy_map_tilenames#Lon..2Flat_to_integers
  */
-function lon2tilex(lon: number, zoom: number): number {
+export function lon2tilex(lon: number, zoom: number): number {
   return Math.floor(((lon + 180.0) / 360.0) * (1 << zoom));
 }
 
@@ -95,7 +118,7 @@ function lon2tilex(lon: number, zoom: number): number {
  * Pure function — deterministic, no side effects.
  * @see https://wiki.openstreetmap.org/wiki/Slippy_map_tilenames#Lon..2Flat_to_integers
  */
-function lat2tiley(lat: number, zoom: number): number {
+export function lat2tiley(lat: number, zoom: number): number {
   return Math.floor(
     (
       1.0 -
@@ -112,7 +135,7 @@ function lat2tiley(lat: number, zoom: number): number {
  * Returns `{ startX, endX, startY, endY }`.
  * Pure function — no side effects.
  */
-function computeTileBounds(
+export function computeTileBounds(
   zoom: number,
   [minLat, minLon, maxLat, maxLon]: BoundingBox,
 ): { startX: number; endX: number; startY: number; endY: number } {
@@ -128,27 +151,39 @@ function computeTileBounds(
  * Counts the total number of tiles in a tile bounding box.
  * Pure function — no side effects.
  */
-function countTiles(bounds: { startX: number; endX: number; startY: number; endY: number }): number {
+export function countTiles(bounds: { startX: number; endX: number; startY: number; endY: number }): number {
   return (bounds.endX - bounds.startX + 1) * (bounds.endY - bounds.startY + 1);
 }
 
 /**
- * Generates all tile coordinates within a bounding box as an array of tuples.
+ * Generates all tile coordinates within a bounding box for a given zoom level.
  * Pure function — no side effects.
  */
-function enumerateTiles(bounds: {
-  startX: number;
-  endX: number;
-  startY: number;
-  endY: number;
-}): Array<{ zoom: number; x: number; y: number }> {
-  const tiles: Array<{ zoom: number; x: number; y: number }> = [];
-  for (let x = bounds.startX; x <= bounds.endX; x++) {
-    for (let y = bounds.startY; y <= bounds.endY; y++) {
-      tiles.push({ zoom: 0, x, y }); // zoom will be set by the caller
-    }
-  }
-  return tiles;
+export function enumerateTiles(
+  zoom: number,
+  bounds: { startX: number; endX: number; startY: number; endY: number },
+): TileCoordinate[] {
+  return range(bounds.startX, bounds.endX + 1).flatMap((x: number) =>
+    range(bounds.startY, bounds.endY + 1).map((y: number) => ({ zoom, x, y })),
+  );
+}
+
+/**
+ * Computes the total number of tiles across all regions and zoom levels.
+ * Pure function — uses reduce for accumulation.
+ */
+export function computeTotalTiles(
+  regions: Record<string, BoundingBox>,
+  zoomLevels: number[],
+): number {
+  const regionTileCounts = Object.values(regions).map((bounds: BoundingBox) =>
+    zoomLevels.map((zoom: number) => {
+      const tileBounds = computeTileBounds(zoom, bounds);
+      return countTiles(tileBounds);
+    }),
+  );
+
+  return regionTileCounts.flat().reduce((sum: number, count: number) => sum + count, 0);
 }
 
 // ---------------------------------------------------------------------------
@@ -157,8 +192,7 @@ function enumerateTiles(bounds: {
 
 /** Formats a log entry as a string with timestamp and level prefix. */
 function formatLogEntry(entry: LogEntry): string {
-  const pad = (str: string, len: number): string =>
-    str.padEnd(len, " ");
+  const pad = (str: string, len: number): string => str.padEnd(len, " ");
   return `[${entry.timestamp}] ${pad(entry.level, 5)} ${entry.message}`;
 }
 
@@ -221,7 +255,7 @@ function tileExists(path: string): boolean {
 
 /**
  * Downloads a single tile from the tile server.
- * Returns `true` if the tile was successfully downloaded, `false` otherwise.
+ * Returns result object indicating tile status.
  * Impure (network I/O, filesystem I/O).
  */
 async function downloadTile(
@@ -232,7 +266,7 @@ async function downloadTile(
   y: number,
   tileServerUrl: (zoom: number, x: number, y: number) => string,
   apiKey: string,
-): Promise<{ success: boolean; alreadyExists: boolean; cached: boolean; error?: string }> {
+): Promise<TileDownloadResult> {
   const path = tilePath(outputDir, zoom, x, y);
 
   // Check if tile already exists in output directory
@@ -286,41 +320,13 @@ async function downloadTile(
 // Main orchestration (pure computation + impure I/O separation)
 // ---------------------------------------------------------------------------
 
-interface TileStats {
-  totalTiles: number;
-  downloaded: number;
-  cached: number;
-  skipped: number;
-  failed: number;
-}
-
-/**
- * Computes the total number of tiles across all regions and zoom levels.
- * Pure function.
- */
-function computeTotalTiles(
-  regions: Record<string, BoundingBox>,
-  zoomLevels: number[],
-): number {
-  let total = 0;
-  for (const zoom of zoomLevels) {
-    for (const bounds of Object.values(regions)) {
-      const tileBounds = computeTileBounds(zoom, bounds);
-      total += countTiles(tileBounds);
-    }
-  }
-  return total;
-}
-
 /**
  * Processes all tiles for the given configuration.
- * Handles both pure computation and impure I/O in a structured way.
+ * Uses functional patterns (map/reduce) for pure computation,
+ * and sequential async processing for I/O operations.
  */
-async function processTiles(
-  config: typeof CONFIG,
-): Promise<TileStats> {
-  const stats: TileStats = {
-    totalTiles: 0,
+async function processTiles(config: typeof CONFIG): Promise<TileStatsAccumulator> {
+  const stats: TileStatsAccumulator = {
     downloaded: 0,
     cached: 0,
     skipped: 0,
@@ -328,72 +334,80 @@ async function processTiles(
   };
 
   // Compute total tiles (pure)
-  stats.totalTiles = computeTotalTiles(config.regions, config.zoomLevels);
+  const totalTiles = computeTotalTiles(config.regions, config.zoomLevels);
 
   // Ensure output directory exists (impure, done once)
   await mkdir(config.outputDir, { recursive: true });
 
   log(createLog("INFO", `Starting tile generation for ${Object.keys(config.regions).length} region(s)`));
   log(createLog("INFO", `Zoom levels: ${config.zoomLevels.join(", ")}`));
-  log(createLog("INFO", `Total tiles to process: ${stats.totalTiles}`));
+  log(createLog("INFO", `Total tiles to process: ${totalTiles}`));
   log(createLog("INFO", `Output directory: ${config.outputDir}`));
   log(createLog("INFO", `Global cache directory: ${config.globalDir}`));
   log(createLog("INFO", "─".repeat(80)));
 
   let completedTiles = 0;
 
-  // Process each zoom level and region (impure I/O in nested loops)
-  for (const zoom of config.zoomLevels) {
-    for (const [regionName, bounds] of Object.entries(config.regions)) {
-      const tileBounds = computeTileBounds(zoom, bounds);
-      const regionTileCount = countTiles(tileBounds);
+  // Generate all tile coordinates using functional patterns (pure)
+  const allTiles: TileCoordinate[] = Object.entries(config.regions).flatMap(
+    ([_regionName, bounds]) =>
+      config.zoomLevels.flatMap((zoom) => {
+        const tileBounds = computeTileBounds(zoom, bounds);
+        return enumerateTiles(zoom, tileBounds);
+      }),
+  );
 
-      log(createLog("INFO", `Region: ${regionName} | Zoom: ${zoom} | Tiles: ${regionTileCount}`));
+  // Process each tile sequentially (impure I/O)
+  for (const tile of allTiles) {
+    const result = await downloadTile(
+      config.outputDir,
+      config.globalDir,
+      tile.zoom,
+      tile.x,
+      tile.y,
+      config.tileServerUrl,
+      config.apiKey,
+    );
 
-      for (let x = tileBounds.startX; x <= tileBounds.endX; x++) {
-        for (let y = tileBounds.startY; y <= tileBounds.endY; y++) {
-          const result = await downloadTile(
-            config.outputDir,
-            config.globalDir,
-            zoom,
-            x,
-            y,
-            config.tileServerUrl,
-            config.apiKey,
-          );
+    completedTiles++;
 
-          completedTiles++;
+    // Update stats using functional update pattern
+    const newStats = result.alreadyExists
+      ? { ...stats, skipped: stats.skipped + 1 }
+      : result.cached
+        ? { ...stats, cached: stats.cached + 1 }
+        : result.success
+          ? { ...stats, downloaded: stats.downloaded + 1 }
+          : { ...stats, failed: stats.failed + 1 };
 
-          if (result.alreadyExists) {
-            stats.skipped++;
-            log(createLog("DEBUG", `Tile ${zoom}/${x}/${y} — already exists (skipped)`));
-          } else if (result.cached) {
-            stats.cached++;
-            log(createLog("DEBUG", `Tile ${zoom}/${x}/${y} — copied from cache`));
-          } else if (result.success) {
-            stats.downloaded++;
-            log(createLog("DEBUG", `Tile ${zoom}/${x}/${y} — downloaded`));
-          } else {
-            stats.failed++;
-            log(createLog("ERROR", `Tile ${zoom}/${x}/${y} — failed: ${result.error}`));
-          }
+    // Log per-tile status
+    const logLevel = result.success ? "DEBUG" : "ERROR";
+    const logMessage = result.alreadyExists
+      ? `Tile ${tile.zoom}/${tile.x}/${tile.y} — already exists (skipped)`
+      : result.cached
+        ? `Tile ${tile.zoom}/${tile.x}/${tile.y} — copied from cache`
+        : result.success
+          ? `Tile ${tile.zoom}/${tile.x}/${tile.y} — downloaded`
+          : `Tile ${tile.zoom}/${tile.x}/${tile.y} — failed: ${result.error}`;
 
-          // Log progress every 100 tiles or at the end
-          if (completedTiles % 100 === 0 || completedTiles === stats.totalTiles) {
-            log(
-              createLog(
-                "INFO",
-                `Progress: ${completedTiles}/${stats.totalTiles} | ` +
-                `Downloaded: ${stats.downloaded} | ` +
-                `Cached: ${stats.cached} | ` +
-                `Skipped: ${stats.skipped} | ` +
-                `Failed: ${stats.failed}`,
-              ),
-            );
-          }
-        }
-      }
+    log(createLog(logLevel as LogLevel, logMessage));
+
+    // Log progress every 100 tiles or at the end
+    if (completedTiles % 100 === 0 || completedTiles === totalTiles) {
+      log(
+        createLog(
+          "INFO",
+          `Progress: ${completedTiles}/${totalTiles} | ` +
+          `Downloaded: ${newStats.downloaded} | ` +
+          `Cached: ${newStats.cached} | ` +
+          `Skipped: ${newStats.skipped} | ` +
+          `Failed: ${newStats.failed}`,
+        ),
+      );
     }
+
+    // Update stats reference
+    Object.assign(stats, newStats);
   }
 
   log(createLog("INFO", "─".repeat(80)));
@@ -402,7 +416,7 @@ async function processTiles(
   log(createLog("INFO", `  Cached:     ${stats.cached}`));
   log(createLog("INFO", `  Skipped:    ${stats.skipped}`));
   log(createLog("INFO", `  Failed:     ${stats.failed}`));
-  log(createLog("INFO", `  Total:      ${stats.totalTiles}`));
+  log(createLog("INFO", `  Total:      ${totalTiles}`));
 
   return stats;
 }
